@@ -1,0 +1,136 @@
+services:
+
+  ### Prefect Database
+  prefect-db:
+    image: postgres:17.2-alpine
+    restart: always
+    container_name: prefect-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_ADMIN_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_ADMIN_PASSWORD}
+      - POSTGRES_DB=prefect
+    expose:
+      - 5432
+    volumes:
+      - prefectdb:/var/lib/postgresql/data
+    profiles: ["server"]
+
+  ### New Database for Flows
+  taxi-db:
+    image: postgres:17.2-alpine
+    restart: always
+    container_name: taxi-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_ADMIN_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_ADMIN_PASSWORD}
+      - POSTGRES_DB=taxidb
+    expose:
+      - 5432
+    volumes:
+      - taxidb:/var/lib/postgresql/data
+    profiles: ["flows"]
+
+
+  ### Prefect Server API and UI
+  server:
+    image: prefecthq/prefect:3.1.15-python3.10
+    restart: always
+    container_name: server
+    volumes:
+      - prefect:/root/.prefect
+    entrypoint: ["/opt/prefect/entrypoint.sh", "prefect", "server", "start"]
+    environment:
+      - PREFECT_UI_URL=http://127.0.0.1:4200/api
+      - PREFECT_API_URL=http://127.0.0.1:4200/api
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+      - PREFECT_API_DATABASE_CONNECTION_URL=${PREFECT_API_DATABASE_CONNECTION_URL}
+    ports:
+      - 4200:4200
+    depends_on:
+      - prefect-db
+    profiles: ["server"]
+
+  spark-app:
+    build: src/prefect_flows/
+    image: my-prefect-flows
+    privileged: true
+    container_name: spark_processor
+    entrypoint: ["python", "main.py"]
+    depends_on:
+      - taxi-db
+    environment:
+      DB_URL: jdbc:postgresql://taxi-db:5432/taxidb
+      DB_HOST: taxi-db
+      DB_PORT: 5432
+      DB_NAME: taxidb
+      DB_USER: ${POSTGRES_ADMIN_USER}
+      DB_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      DATA_FILES_PATH: /data/
+      PREFECT_API_URL: http://server:4200/api
+    volumes:
+      - ./data:/data
+    profiles: ["flows"]
+
+  # Grafana
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    restart: always
+    ports:
+      - 3025:3000
+    volumes:
+      - ./src/monitoring/grafana/:/etc/grafana/provisioning
+      - grafana-storage:/var/lib/grafana
+    profiles: ["monitor"]
+
+  #Prometheus
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    privileged: true
+    volumes:
+      - ./src/monitoring/prometheus:/etc/prometheus
+      - prom_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yaml'
+    restart: always
+    profiles: ["monitor"]
+
+  #cAdvisor
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    depends_on:
+      - server
+    profiles: ["monitor"]
+
+  dash-app:
+    build: src/front_end/
+    image: my-dash-app
+    privileged: true
+    ports:
+      - 8053:8053
+    container_name: dash_app
+    entrypoint: ["python", "main.py"]
+    environment:
+      DB_URL: ${DASH_DB_URL}
+      SERVER_SECRET_KEY: ${DASH_SERVER_SECRET_KEY}
+      DASHBOARD_USER: $DASHBOARD_USER
+      DASHBOARD_PASSWORD: $DASHBOARD_PASSWORD
+    profiles: ["frontend"]
+
+volumes:
+  prefect:
+  prefectdb:
+  taxidb:
+  grafana-storage:
+  prom_data:
+networks:
+  default:
+    name: project-network
